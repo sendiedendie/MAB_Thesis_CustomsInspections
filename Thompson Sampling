@@ -1,0 +1,481 @@
+# 1.1 Clean up the environment
+#----------------------------------------------------------
+remove(list=ls())                  # Global environment
+cat("\f")                          # Console
+if(!is.null(dev.list())) dev.off() # Plots repository
+
+#----------------------------------------------------------
+# 1.2 Install (if needed) and load (activate) packages with
+# additional functionality. 
+#----------------------------------------------------------
+library(extraDistr)
+library(ggplot2)
+library(plyr)
+library(reshape2)
+# library(stargazer)
+# library(lpSolve)
+
+#----------------------------------------------------------
+# 1.3 Define folder structure
+#----------------------------------------------------------
+dir      <- "/Users/hanpeiwu/CustomsProjectMAB/"
+
+dirProg  <- paste0(dir, "Programs")
+dirData  <- paste0(dir, "Data")
+dirRslt  <- paste0(dir, "Results")
+
+#----------------------------------------------------------
+# 2: Multiple declarants, independent learning, register
+#----------------------------------------------------------
+
+# Declarations per declarant are assumed to be submitted 
+# as a finite list at the beginning of the prior to any 
+# other activities. Potential relevances are: (i) the 
+# same list is used for the known and believed theta's,
+# (ii) the number of declarations is
+# finite rather than infinite (as in drawing from a
+# statistical distribution), and (iii) the number of
+# declarations can be made part of the research question.
+
+
+#----------------------------------------------------------
+# 2.1 Settings declarants
+#----------------------------------------------------------
+
+# Parameter theTheta represents the proportion declarations
+# at fault per declarant; this is the number to learn by
+# customs
+theTheta <- c(0.2, 0.1, 0.75, 0.7, 0.9, 0.8)
+
+# Parameter theDeclarations represents the number of
+# declarations per declarant; it should have the same length
+# as theTheta
+theDeclarations <- c(160000, 200000, 150000, 75000, 22000, 44000)
+
+# Check lengths of theTheta and theDeclarations
+if (length(theTheta) != length(theDeclarations)) {
+  warning("Lengths of theTheta and theDeclarations must be equal")}
+
+# Number of declarants
+nDeclarants <- length(theTheta)
+
+#----------------------------------------------------------
+# 2.2 Settings customs
+#----------------------------------------------------------
+
+# Prior beliefs about declaration quality of the declarant
+# (setting alpha_i to 1, implies that the prior is
+# non-informative, i.e., it is equal to 1 for all x). 
+
+# At present, non-informative priors are assumed for all
+# declarants
+alpha <- cbind(1, 1)
+
+# Total number of checks performed in each time period; this
+# total number of checks is randomly allocated to the
+# declarants within the simulation
+nChecks <- 365
+
+
+#----------------------------------------------------------
+# 2.3 Settings simulation
+#----------------------------------------------------------
+
+# Number of time periods considered
+nTime <- 300
+
+# Data frame to capture results; it contains the time
+# period, the parameters alpha of the prior distribution,
+# which are set for the first round, and updated during the
+# simulation, and column id's of these alpha's for easy
+# processing. The admin is done separatelty for each
+# declarant
+dfResults <- data.frame(t = 1:nTime, 
+                        prior_alpha.1         = NA,
+                        prior_alpha.2         = NA,
+                        theta.believed        = NA,
+                        checks.performed      = NA,
+                        flaws.observed        = NA,
+                        posterior_alpha.1     = NA,
+                        posterior_alpha.2     = NA,
+                        theta.estimated       = NA,
+                        true.checks.performed = NA,
+                        true.flaws.observed   = NA)
+
+col_prior     <- grep("^prior_alpha", colnames(dfResults)) 
+col_posterior <- grep("^posterior_alpha", colnames(dfResults)) 
+
+# Store admin files for each declarant in a list
+theResults <- lapply(1:nDeclarants, function(k) dfResults)
+
+# Initiate the prior hyperparameters alpha for each
+# declarant separately
+theResults <- lapply(1:nDeclarants, 
+                     function(k) {
+                       theResults[[k]][1,col_prior] <- alpha;
+                       theResults[[k]]})
+
+# Start loop over the time periods
+for (t in 1:nTime) {
+  # Notifications
+  if (t %% 100 == 0) cat("Time period:", t, "\n")
+  
+  # Step 1: before the new day dawning, declarants submit
+  # declarations to the system. These declaratios can be
+  # flawed or correct in accordance with the
+  # declaration-specific theta
+  declarations <- lapply(1:nDeclarants, function(k) {
+    x      <- rep(0, theDeclarations[k])   # Make declarations register, all OK
+    flw    <- sample(1:theDeclarations[k], # Randomly assign flawed declarations
+                     theTheta[k]*theDeclarations[k])
+    x[flw] <- 1                            # Identify flawed declarations
+    
+    # Return declarant's register for day t
+    return(x)
+  })
+  
+  # Step 2: customs planners arriving at work, retrieve
+  # priors of the fault process; subsequently they randomly
+  # select fault proportions from the (updated) prior
+  # distribution of beliefs
+  alpha.believed <- 
+    do.call(rbind, 
+            lapply(1:nDeclarants, 
+                   function(k) theResults[[k]][t, col_prior]))
+  
+  theta.believed <- 
+    do.call(rbind,
+            lapply(1:nDeclarants, 
+                   function(k) rdirichlet(1, alpha.believed[k,])))
+  
+  # Step 3: Resource Allocation using Thompson Sampling
+  theta_samples <- sapply(1:nDeclarants, function(k) {
+    theta_samples <- rbeta(1000, alpha.believed[k, 1], alpha.believed[k, 2])
+    return(mean(theta_samples))  # Use mean as probability estimate
+  })
+  
+  # Allocate resources based on Thompson Sampling
+  checks.performed <- round(nChecks * theta_samples / sum(theta_samples))
+  
+
+  # Step 4a: outcome of the randomly selected declarations
+  # based on assumed theta; observed outcomes of the
+  # selection are based on the true, though unobaserved
+  # theta
+  checks.ids <- lapply(1:nDeclarants, 
+                       function(k) sample(1:length(declarations[[k]]), checks.performed[k]))
+  
+  checks.results   <- lapply(1:nDeclarants, 
+                             function(k) declarations[[k]][checks.ids[[k]]])
+  
+  flaws.observed <- do.call(rbind,
+                            lapply(1:nDeclarants, function(k) sum(checks.results[[k]])))
+  
+  # Step 4b: same as 4a, but with allocation based on
+  # assumed knowledge of the true theta, which is used to
+  # calculate regret
+  true.checks.performed <- c(rmultinom(1, nChecks, theTheta))
+  true.checks.ids       <- lapply(1:nDeclarants, 
+                                  function(k) sample(1:length(declarations[[k]]), true.checks.performed[k]))
+  true.checks.results    <- lapply(1:nDeclarants, 
+                                   function(k) declarations[[k]][true.checks.ids[[k]]])
+  true.flaws.observed    <- do.call(rbind,
+                                    lapply(1:nDeclarants, 
+                                           function(k) sum(true.checks.results[[k]])))
+  
+  # Step 5: update belief parameters
+  alpha.posterior <- 
+    alpha.believed + cbind(flaws.observed, checks.performed - flaws.observed)
+  theta.estimated <- 
+    alpha.posterior[,1]/ rowSums(alpha.posterior)
+  
+  # Step 6: store the results
+  theResults <- lapply(1:nDeclarants, function(k) {
+    theResults[[k]]$theta.believed[t]   <- theta.believed[k,1];
+    theResults[[k]]$checks.performed[t] <- checks.performed[k];
+    theResults[[k]]$flaws.observed[t]   <- flaws.observed[k,1];
+    theResults[[k]][t, col_posterior]   <- as.numeric(alpha.posterior[k,]);
+    theResults[[k]]$theta.believed[t]   <- theta.believed[k];
+    theResults[[k]]$theta.estimated[t]  <- as.numeric(theta.estimated[k]);
+    if (t < nTime) theResults[[k]][t+1, col_prior] <- as.numeric(alpha.posterior[k,]);
+    theResults[[k]]$true.checks.performed[t] <- true.checks.performed[k];
+    theResults[[k]]$true.flaws.observed[t]   <- true.flaws.observed[k,1];
+    theResults[[k]]
+  })
+  
+} # end of the time period
+
+
+#----------------------------------------------------------
+# 2.4 Calculate absolute differences estimated and true theta's
+#----------------------------------------------------------
+
+# Make dataframe with subset of relevant information (in
+# this case, this information consists of estimated theta's)
+sub <- c("t", "theta.estimated")
+
+dfTheta <- do.call(rbind, 
+                   lapply(1:nDeclarants, 
+                          function(k) cbind(theResults[[k]][,sub], declarant=k)))
+
+# Calculate absolute difference between estimated theta and true theta
+dfTheta <- within(dfTheta, {
+  abs_diff <- abs(theta.estimated - theTheta[declarant])
+})
+
+
+
+#----------------------------------------------------------
+# 2.5 Regret calculation
+#----------------------------------------------------------
+
+# Regret is defined as the (running) average number of
+# seizures given knowledge about the true theta's minus the
+# (running) average of seizures based on the believed theta.
+# This is done for the separate declarants and for the
+# declarants combined
+
+sub <- c("t", 
+         "checks.performed", "flaws.observed", 
+         "true.checks.performed", "true.flaws.observed")
+
+dfSeized.decl <- do.call(rbind, 
+                         lapply(1:nDeclarants, 
+                                function(k) cbind(theResults[[k]][,sub], declarant=k)))
+
+dfSeized.comb <- ddply(dfSeized.decl, .(t), summarise,
+                       checks.performed      = sum(checks.performed),
+                       flaws.observed        = sum(flaws.observed),
+                       true.checks.performed = sum(true.checks.performed),
+                       true.flaws.observed   = sum(true.flaws.observed))
+
+# Calculate cumulative seizures, per declarant and for
+# declarants combined
+dfSeized.decl <- ddply(dfSeized.decl, .(declarant), mutate,
+                       cum.flaws.observed      = cumsum(flaws.observed),
+                       cum.true.flaws.observed = cumsum(true.flaws.observed))
+
+dfSeized.comb$cum.flaws.observed      <- cumsum(dfSeized.comb$flaws.observed)
+dfSeized.comb$cum.true.flaws.observed <- cumsum(dfSeized.comb$true.flaws.observed)
+
+# Calculate regret
+dfSeized.decl <- within(dfSeized.decl,
+                        regret <- (cum.true.flaws.observed - cum.flaws.observed)/t
+)
+
+dfSeized.comb <- within(dfSeized.comb,
+                        regret <- (cum.true.flaws.observed - cum.flaws.observed)/t
+)
+
+# Calculate overall regret
+overall_regret <- mean(dfSeized.comb$regret)
+
+
+#----------------------------------------------------------
+# 2.7 Visualizing regret
+#----------------------------------------------------------
+
+# Generate summary statistics for regret over time
+summary_regret <- aggregate(regret ~ declarant, data = dfSeized.decl, FUN = function(x) c(Mean_Regret = mean(x), Median_Regret = median(x)))
+summary_regret <- rbind(summary_regret, c("Overall", Mean_Regret = overall_regret, Median_Regret = NA))
+
+# Print summary statistics
+print(summary_regret) 
+
+
+# Prepare for the plot
+txt <- paste(strwrap("Line plot of (running) average regret over the
+                     rounds of the experiment, per declarant", 
+                     40),
+             collapse="\n")
+
+ggplot(dfSeized.decl, aes(x=t, y=regret, color=as.factor(declarant))) +
+  geom_line() +
+  geom_hline(yintercept = 0, linetype=2) +
+  ylab("(Running) average regret per declarant") +
+  xlab("Round, t") +
+  annotate(geom="text", x=15, y=20, label=txt, size=6, hjust=0,
+           fontface="italic") +
+  scale_colour_brewer("declarant", palette="Set1", 
+                      labels = theTheta) +
+  theme_bw()
+
+ggsave(file=paste0(dirRslt, "CustomsProject_ThompsonSampling_Regret_per_declarant.pdf"),
+       width=3, height=5)
+
+# Prepare for the plot
+
+ggplot(dfSeized.decl, aes(x=t, y=regret, color=as.factor(declarant))) +
+  geom_line() +
+  geom_line(aes(color="comb"), data = dfSeized.comb) + 
+  geom_hline(yintercept = 0, linetype=2) +
+  ylab("(Running) average regret per declarant and combined") +
+  xlab("Round, t") +
+  scale_colour_brewer("declarant", palette="Set1", 
+                      labels = c(theTheta, "comb")) +
+  theme_bw()
+
+ggsave(file=paste0(dirRslt, "CustomsProject_ThompsonSampling_Regret_per_declarant_+combined.pdf"),
+       width=3, height=5)
+
+#----------------------------------------------------------
+# 2.7 Visualize (absolute differences between true and) estimated theta's
+#----------------------------------------------------------
+
+# Generate statistics summary
+summary_stats <- aggregate(abs_diff ~ declarant, data = dfTheta, FUN = function(x) c(MAE = mean(x), RMSE = sqrt(mean(x^2))))
+
+# Print summary statistics
+print(summary_stats)
+
+# Prepare for the plot for theta estimation
+
+ggplot(dfTheta, aes(x=t, y=theta.estimated, color=as.factor(declarant))) +
+  geom_line() +
+  lapply(1:nDeclarants, function(k) geom_hline(yintercept = theTheta[k], linetype=2)) +
+  ylab("Proportion of believed theta, true theta") +
+  xlab("Round, t") +
+  scale_colour_brewer("declarant", palette="Set1", labels = theTheta) +
+  theme_bw()
+
+ggsave(file=paste0(dirRslt, "CustomsProject_ThompsonSampling_ThetaEstimate_per_declarant.pdf"),
+       width=3, height=5)
+
+# Prepare for the plot for absolute differences between estimated and true thetas
+ggplot(dfTheta, aes(x = t, y = abs_diff, color = as.factor(declarant))) +
+  geom_line() +
+  ylab("Absolute Difference") +
+  xlab("Round, t") +
+  scale_colour_brewer("Declarant", palette = "Set1") +
+  theme_bw()
+
+ggsave(file=paste0(dirRslt, "CustomsProject_ThompsonSampling_diffTheta_per_declarant.pdf"),
+       width=3, height=5)
+
+#----------------------------------------------------------
+# 3.0 Data analysis
+#----------------------------------------------------------
+# Define time points to show throughout the analysis
+time_points <- c(1, 50,100,150, 200,250, 300)  
+
+#----------------------------------------------------------
+# 3.1 Regret development over time
+#----------------------------------------------------------
+
+# Filter regret for specific time points
+specific_values <- dfSeized.comb[dfSeized.comb$t %in% time_points, ]
+
+# Create a regret summary table
+regret_summary_table <- data.frame(Time_Point = specific_values$t,
+                            Mean_Regret = specific_values$regret)
+# Print the summary table
+print(regret_summary_table)
+
+#----------------------------------------------------------
+# 3.1 MSE and MAE development over time
+#----------------------------------------------------------
+dfSubset <- dfSeized.decl[dfSeized.decl$t %in% time_points, ]
+
+# Calculate MAE and MSE for specific time points
+mae_values <- aggregate(abs(dfSubset$flaws.observed - dfSubset$true.flaws.observed), 
+                        by = list(dfSubset$t), FUN = mean)
+mse_values <- aggregate((dfSubset$flaws.observed - dfSubset$true.flaws.observed)^2, 
+                        by = list(dfSubset$t), FUN = mean)
+rmse_values <- aggregate((dfSubset$flaws.observed - dfSubset$true.flaws.observed)^2, 
+                         by = list(dfSubset$t), FUN = function(x) sqrt(mean(x)))
+
+
+# Create summary table
+summary_table_mae <- data.frame(Time_Point = mae_values$Group.1,
+                                Mean_MAE = mae_values$x)
+
+summary_table_mse <- data.frame(Time_Point = mse_values$Group.1,
+                                Mean_MSE = mse_values$x)
+summary_table_mse$RMSE <- sqrt(summary_table_mse$Mean_MSE)
+summary_table_rmse <- data.frame(Time_Point = rmse_values$Group.1,
+                                 Mean_RMSE = rmse_values$x)
+# Print the summary tables
+print(summary_table_mae)
+print(summary_table_mse)
+print(summary_table_rmse)
+summary_table <- merge(summary_table_mae, summary_table_rmse, by = "Time_Point")
+
+
+# Calculate MAE and RMSE for all time points (all t)
+mae_values_all <- sapply(1:nrow(dfSeized.decl), function(i) {
+  mean(abs(dfSeized.decl$flaws.observed[1:i] - dfSeized.decl$true.flaws.observed[1:i]))
+})
+
+mse_values_all <- sapply(1:nrow(dfSeized.decl), function(i) {
+  mean((dfSeized.decl$flaws.observed[1:i] - dfSeized.decl$true.flaws.observed[1:i])^2)
+})
+rmse_values_all <- sqrt(mse_values_all)
+
+# Create a data frame for plotting
+summary_table_all <- data.frame(
+  Time_Point = 1:nrow(dfSeized.decl),
+  Mean_MAE = mae_values_all,
+  Mean_RMSE = rmse_values_all
+)
+
+# Reshape data for plotting
+summary_long <- melt(summary_table, id.vars = "Time_Point", 
+                     variable.name = "Error_Type", value.name = "Mean_Value")
+# Plot MAE and MSE together
+ggplot(summary_long, aes(x = Time_Point, y = Mean_Value, color = Error_Type, linetype = Error_Type)) +
+  geom_line() +
+  labs(x = "Time Point", y = "Error") +
+  scale_color_manual(values = c("Mean_MAE" = "blue", "Mean_RMSE" = "red"),
+                     labels = c("MAE", "RMSE")) +
+  scale_linetype_manual(values = c("Mean_MAE" = "solid", "Mean_RMSE" = "dashed"),
+                        labels = c("MAE", "RMSE")) +
+  theme_bw()
+#----------------------------------------------------------
+# 3.2 Theta believed development over time
+#----------------------------------------------------------
+
+# Extract theta.believed values for specific time points
+theta_believed_values <- do.call(rbind, lapply(1:nDeclarants, function(k) {
+  data.frame(Time_Point = time_points,
+             Declarant = k,
+             Theta_Believed = theResults[[k]]$theta.believed[time_points]) 
+}))
+
+# Reshape the data into a wide format
+theta_believed_wide <- dcast(theta_believed_values, Time_Point ~ Declarant, value.var = "Theta_Believed")
+
+# Print the table
+print(theta_believed_wide)
+
+# Save the table to a CSV file if needed
+write.csv(theta_believed_wide, file = paste0(dirRslt, "ThetaBelieved_Comparison.csv"), row.names = FALSE)
+
+# Calculate MAE for all time points
+mae_values_all <- sapply(1:nrow(dfSeized.decl), function(i) {
+  mean(abs(dfSeized.decl$flaws.observed[1:i] - dfSeized.decl$true.flaws.observed[1:i]))
+})
+
+# Calculate RMSE for all time points
+mse_values_all <- sapply(1:nrow(dfSeized.decl), function(i) {
+  mean((dfSeized.decl$flaws.observed[1:i] - dfSeized.decl$true.flaws.observed[1:i])^2)
+})
+rmse_values_all <- sqrt(mse_values_all)
+
+# Create a data frame for plotting
+summary_table_all <- data.frame(
+  Time_Point = 1:nrow(dfSeized.decl),
+  Mean_MAE = mae_values_all,
+  Mean_RMSE = rmse_values_all
+)
+# Calculate overall MAE
+overall_mae <- mean(abs(dfSeized.decl$flaws.observed - dfSeized.decl$true.flaws.observed))
+
+# Calculate overall RMSE
+overall_rmse <- sqrt(mean((dfSeized.decl$flaws.observed - dfSeized.decl$true.flaws.observed)^2))
+
+# Print overall MAE and RMSE
+cat("Overall MAE:", overall_mae, "\n")
+cat("Overall RMSE:", overall_rmse, "\n")print (summary_table)
+print(regret_summary_table)
+print(summary_table_mae)
+print(summary_table_mse)
